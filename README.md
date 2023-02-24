@@ -6,3 +6,5 @@ You can take over the client's computer and use your keyboard and mouse to contr
 You can lock the client's screen by disabling their mouse and keyboard.
 
 There will be levels of permissions, each level will have different abilities.
+![RightArrow](https://user-images.githubusercontent.com/87939329/221230456-ec20e9ef-a048-4c5e-88b4-33a626bcc10e.png)
+
