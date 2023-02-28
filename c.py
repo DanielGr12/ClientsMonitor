@@ -4,7 +4,7 @@ from socket import socket
 from turtle import width
 from zlib import decompress, compress
 from mss import mss
-
+import os
 import mouse
 import pygame
 import wx
@@ -17,6 +17,14 @@ import pyautogui
 import sys
 import tcp_by_size
 import time
+import keyboard
+# from pynput.keyboard import Key, Controller
+import pynput
+from Crypto.Cipher import AES
+import hashlib
+from zipfile import ZipFile
+import numpy as np
+import cv2
 
 
 class Register(wx.Dialog):
@@ -107,36 +115,160 @@ class Login(wx.Dialog):
 
 APP_SIZE_X = 300
 APP_SIZE_Y = 500
-width, height = pyautogui.size()
-width -= 1
-height -= 30
+frameWidth, frameHeight = pyautogui.size()
+frameWidth -= 1
+frameHeight -= 30
+rect = {'top': 0, 'left': 0, 'width': frameWidth, 'height': frameHeight}
 
+key = ""
 keyboard_action = "nothing"
 mouse_action = "nothing"
 
 mouseAndKeyboard = False
-
-
+sleepTime = 0
+lastSleepTime = 0
+keysListen = False
 BS = 16
+inputDisabled = False
+# keyboard = Controller()
+fileData = ""
+tagAndNonce = ""
+keyboard_listener = pynput.keyboard.Listener(suppress=True)
+mouse_listener = pynput.mouse.Listener(suppress=True)
+digitalSignature = b""
+streaming = True
+monitorNum = 0
 
 
 def pad(s): return s + (BS - len(s) % BS) * chr(BS - len(s) % BS)
 def unpad(s): return s[:-ord(s[len(s)-1:])]
 
 
-def retreive_screenshot(cli_sock, sleepTime):  # ,key
+def handle_server_event(evt, sock):
+    global sleepTime, lastSleepTime, frameHeight, frameWidth, rect, keysListen, keyboard_listener, mouse_listener, streaming, inputDisabled, fileData, tagAndNonce, digitalSignature, monitorNum
+    # ~ is nothing
+    if (evt == "~"):
+        return
+    elif (evt == "stop"):
+        # wait until event
+        tcp_by_size.recv_by_size(sock)
+    # elif (evt == "stop"):
+    #     # wait until event
+    #     tcp_by_size.recv_by_size(sock)
+    elif (evt == "control"):
+        lastSleepTime = sleepTime
+        sleepTime = 0
+        frameHeight += 30
+        frameWidth += 1
+        rect = {'top': 0, 'left': 0, 'width': frameWidth, 'height': frameHeight}
+
+        # Recieve keys events
+        keysListen = True
+
+        if (keyboard_listener.is_alive() == True):
+            keyboard_listener.stop()
+            keyboard_listener = pynput.keyboard.Listener(suppress=True)
+
+    # End control
+    elif (evt == "eControl"):
+        sleepTime = lastSleepTime
+        frameHeight -= 30
+        frameWidth -= 1
+        rect = {'top': 0, 'left': 0, 'width': frameWidth, 'height': frameHeight}
+        keysListen = False
+        if (inputDisabled == True):
+            keyboard_listener.start()
+
+    # disable mouse and keyboard
+    elif (evt == "disable_input"):
+        # mouse_listener = pynput.mouse.Listener(suppress=True)
+        # mouse_listener.start()
+        if (keyboard_listener.is_alive() == False):
+            keyboard_listener.start()
+            inputDisabled = True
+    elif (evt == "enable_input"):
+        if (keyboard_listener.is_alive()):
+            keyboard_listener.stop()
+            keyboard_listener = pynput.keyboard.Listener(suppress=True)
+            inputDisabled = False
+    elif ("getFile" in evt):
+        fileName = evt.split("~")[1]
+
+        # Get data
+        with open(fileName, 'r') as file:
+            data = file.read()
+        bytes_key = key.encode()
+
+        # Generate the digital signature to send to the server
+        digitalSignature = hashlib.sha256()
+        digitalSignature.update(data.encode()+key.encode())
+
+        # Encrypt the data
+        cipher = AES.new(bytes_key, AES.MODE_EAX)
+        cipherText, tag = cipher.encrypt_and_digest(data.encode())
+        tagAndNonce = cipher.nonce+b"|"+tag
+        fileData = cipherText
+
+        print(
+            f"cipher:{cipherText}\ntag:{tag}\nnonce:{cipher.nonce}")
+    elif (evt == "rightMon"):
+        print("Change monitor to right")
+        monitorNum += 1
+        with mss() as sct:
+            mon = sct.monitors[monitorNum+1]
+        rect = {'top': mon["top"], 'left': mon["left"],
+                'width': mon["width"]-1, 'height': mon["height"]-30}
+
+    elif (evt == "leftMon"):
+        monitorNum -= 1
+        with mss() as sct:
+            mon = sct.monitors[monitorNum+1]
+        rect = {'top': mon["top"], 'left': mon["left"],
+                'width': mon["width"]-1, 'height': mon["height"]-30}
+        print("Change monitor to left")
+
+
+def handle_keyboard_request(data):
+    parts = data.split("~")
+
+    if (parts[0] != "_" and parts[0] != ""):
+        # Check if the manager wants to exit the control mode:
+
+        # l_alt = 1073742050,l_ctrl = 1073742048,r_alt = 1073742054,r_ctrl = 1073742052
+        if (parts[0] == "1073742050" or parts[0] == "1073742054"):
+            key = "alt"
+        elif (parts[0] == "1073742048" or parts[0] == "1073742052"):
+            key = "ctrl"
+        else:
+            key = chr(int(parts[0]))
+
+        print(f"got - {key}")
+        keyboard.send(key)
+
+
+def retreive_screenshot(cli_sock):  # ,key
+    global rect
     with mss() as sct:
         # The region to capture
-        rect = {'top': 0, 'left': 0, 'width': width, 'height': height}
         try:
-            while 'recording':
-
+            while streaming:
                 # Capture the screen
                 img = sct.grab(rect)
+
                 # Tweak the compression level here (0-9)
                 pixels = compress(img.rgb, 6)
 
                 tcp_by_size.send_with_size(cli_sock, pixels)
+                print("sent")
+                server_event = tcp_by_size.recv_by_size(cli_sock).decode()
+                handle_server_event(server_event, cli_sock)
+                if ("getFile" in server_event):
+                    # print(key.encode())
+                    # print(b"fData~"+fileData+b"~"+tagAndNonce)
+
+                    tcp_by_size.send_with_size(
+                        cli_sock, b"fData|"+fileData+b"|"+tagAndNonce+b"|"+digitalSignature.digest())
+
                 time.sleep(sleepTime)
                 # TODO: check with aes
                 # raw = pad(size_len)
@@ -144,19 +276,22 @@ def retreive_screenshot(cli_sock, sleepTime):  # ,key
                 # cipher = AES.new(key.encode(), AES.MODE_CBC, iv)
                 # cli_sock.send(base64.b64encode(iv + cipher.encrypt(raw.encode())))
 
-                # # Handle keyboard inputs
-                # keyboard_data = cli_sock.recv(1024)
-                # handle_keyboard_request(keyboard_data.decode())
+                # Handle keyboard inputs
+                if (keysListen):
+                    keyboard_data = tcp_by_size.recv_by_size(cli_sock)
+                    handle_keyboard_request(keyboard_data.decode())
 
                 # # # Handle mouse events
                 # mouse_data = cli_sock.recv(1024)
                 # handle_mouse_requests(mouse_data.decode())
         except Exception as e:
+
             print(e)
 
 
 def diffieH(sock):
     sock.send("dp".encode())
+    # dat = sock.recv(1024)
     g, n = sock.recv(1024).decode().split('|')
     g = int(g)
     n = int(n)
@@ -175,7 +310,17 @@ def diffieH(sock):
     sock.send(str(pow(g, b) % n).encode())
 
     # Mix the private variable with the mix of the other side
-    return str(pow(ag, b) % n)  # Key
+    k = str(pow(ag, b) % n)  # key
+    padded_key = k
+    round = len(k)
+    index = 0
+    while (len(padded_key) < 16):
+        if (index == round):
+            index = 0
+        padded_key += k[index]
+        index += 1
+
+    return padded_key  # Key
 
 
 def handle_identification(cli_sock):
@@ -191,14 +336,18 @@ def handle_identification(cli_sock):
 
 
 def main(host="127.0.0.1", port=1234):
+    global sleepTime, key
     # Setting up the client
     sock = socket()
-    sock.connect((host, port))
 
+    # Try to connect until the connection is successful
+    while True:
+        try:
+            sock.connect((host, port))
+            break
+        except:
+            pass
     # handle_identification(sock)
-
-    # Getting the private key for the encryptions
-    # key = diffieH(sock)
 
     try:
         # calculate the sleep between each frame
@@ -208,7 +357,16 @@ def main(host="127.0.0.1", port=1234):
         else:
             sleep_time = 1/fps
 
-        retreive_screenshot(sock, sleep_time)  # ,key
+        sleepTime = sleep_time
+
+        with mss() as sct:
+            tcp_by_size.send_with_size(
+                sock, str(len(sct.monitors[1:])).encode())
+
+        # Getting the private key for the encryptions
+        key = diffieH(sock)
+
+        retreive_screenshot(sock)  # ,key
     except Exception as e:
         print(e)
 
